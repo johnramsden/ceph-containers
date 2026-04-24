@@ -109,8 +109,7 @@ jobs:
 
   RookTest:
     needs: build-rock
-    # Minikube action only works on Jammy. 
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
@@ -120,8 +119,16 @@ jobs:
 
       - name: setup cluster resources
         uses: ./.github/workflows/canary-test-config
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # kubectl create -k (kustomize) shells out to git-remote-https, which fails with a
+      # libcurl symbol error on Ubuntu 24.04 runners when the k8s snap alters the library
+      # search path. Installing libcurl4t64 provides the ABI version that includes
+      # curl_global_trace and resolves the mismatch.
+      - name: Work around git-core PPA libcurl mismatch
+        run: |
+          sudo add-apt-repository --remove ppa:git-core/ppa -y
+          sudo apt-get update
+          sudo apt-get install --reinstall --allow-downgrades -y git git-man
 
       - name: validate-yaml
         run: |
@@ -130,9 +137,8 @@ jobs:
 
       - name: use local disk and create partitions for osds
         run: |
-          cd rook
-          ./tests/scripts/github-action-helper.sh use_local_disk
-          ./tests/scripts/github-action-helper.sh create_partitions_for_osds
+          test/scripts/rook_helper.sh use_local_disk
+          test/scripts/rook_helper.sh create_partitions_for_osds
 
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -361,6 +367,7 @@ jobs:
         with:
           name: canary
         
-      - name: consider debugging
-        uses: lhotari/action-upterm@v1
+      - name: Setup tmate session
         if: failure()
+        uses: mxschmitt/action-tmate@v3
+        timeout-minutes: 90
