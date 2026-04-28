@@ -1,9 +1,5 @@
 name: Cluster Setup
 description: Cluster setup for canary test
-inputs:
-  github-token:
-    description: GITHUB_TOKEN from the calling workflow
-    required: true
 
 runs:
   using: "composite"
@@ -13,29 +9,62 @@ runs:
       with:
         go-version: 1.18
 
-    - name: setup minikube
-      uses: manusa/actions-setup-minikube@v2.7.2
-      with:
-        minikube version: "v1.28.0"
-        kubernetes version: "v1.25.0"
-        start args: --memory 6g --cpus=2 --addons ingress
-        github token: ${{ inputs.github-token }}
+    - name: Install canonical k8s snap
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo snap install k8s --classic --channel 1.32-classic/stable
+
+    - name: Configure insecure registry for localhost:5000
+      shell: bash
+      # containerd registry hosts config — https://github.com/containerd/containerd/blob/main/docs/hosts.md
+      run: |
+        set -euxo pipefail
+        sudo mkdir -p "/var/snap/k8s/common/containerd/hosts.d/localhost:5000"
+        printf 'server = "http://localhost:5000"\n\n[host."http://localhost:5000"]\n  capabilities = ["pull", "resolve"]\n  skip_verify = true\n' \
+          | sudo tee "/var/snap/k8s/common/containerd/hosts.d/localhost:5000/hosts.toml"
+
+    - name: Bootstrap k8s cluster
+      shell: bash
+      run: |
+        set -euxo pipefail
+        # Ubuntu runners ship Docker whose containerd owns /run/containerd;
+        # redirect k8s containerd to the snap's own directory to avoid the conflict.
+        printf 'containerd-base-dir: /var/snap/k8s/common/containerd\n' \
+          | sudo tee /tmp/k8s-bootstrap.yaml
+        sudo k8s bootstrap --file /tmp/k8s-bootstrap.yaml
+        sudo k8s status --wait-ready
+        sudo k8s enable network
+        sudo k8s enable ingress
+
+    - name: Configure kubeconfig and kubectl
+      shell: bash
+      run: |
+        set -euxo pipefail
+        mkdir -p ~/.kube
+        sudo k8s config > ~/.kube/config
+        chmod 600 ~/.kube/config
+        printf '#!/bin/sh\nexec sudo k8s kubectl "$@"\n' | sudo tee /usr/local/bin/kubectl
+        sudo chmod +x /usr/local/bin/kubectl
 
     - name: download rook release
       uses: robinraju/release-downloader@v1.6
-      with: 
+      with:
         repository: "rook/rook"
         tag: "v1.12.8"
         tarBall: true
-        
-        
-    - name: Run a multi-line script
-      shell: bash --noprofile --norc -eo pipefail -x {0}
+
+    - name: Unpack rook release
+      shell: bash
       run: |
+        set -euxo pipefail
         tar xf rook-*.tar.gz
         rm -f *.tar.gz
         mv rook-* rook
-        
+
     - name: print k8s cluster status
-      shell: bash --noprofile --norc -eo pipefail -x {0}
-      run: cd rook ; ./tests/scripts/github-action-helper.sh print_k8s_cluster_status
+      shell: bash
+      run: |
+        set -euxo pipefail
+        cd rook
+        ./tests/scripts/github-action-helper.sh print_k8s_cluster_status
